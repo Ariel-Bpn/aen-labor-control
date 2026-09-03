@@ -671,7 +671,8 @@ function dataAwal() {
       jamPagiMasuk: '07:00', jamPagiPulang: '12:00', jamSiangMasuk: '13:00', jamSorePulang: '17:00',
       jamLemburMasuk: '18:00', jamLemburPulang: '22:00',
       toleransi: 15,
-      modeLembur: 'FIX_PER_JAM', tarifLemburJam: 0,
+      modeLembur: 'PRORATA_HARIAN', tarifLemburJam: 0,
+      jamKerjaSehari: 7, pengaliKerja: 1, pengaliLibur: 2,
       hariKerjaSebulan: 25, pembagiJam: 173, sistemKerja: '6HARI', hariLibur: [0],
       tarifJabatan: Object.assign({}, TARIF_AWAL),
       namaFinance: '', jabatanFinance: 'Finance & Administration',
@@ -737,13 +738,31 @@ function faktorPP35(jam, libur) {
   if (s.sistemKerja === '5HARI') return Math.min(h, 8) * 2 + Math.min(Math.max(h - 8, 0), 1) * 3 + Math.max(0, h - 9) * 4;
   return Math.min(h, 7) * 2 + Math.min(Math.max(h - 7, 0), 1) * 3 + Math.max(0, h - 8) * 4;
 }
+/* Tarif lembur per jam untuk SATU orang, mengikuti upah harian jabatannya */
+function tarifLemburOrang(harian, libur) {
+  const s = DB.pengaturan;
+  if (s.modeLembur === 'TIDAK_ADA') return 0;
+  if (s.modeLembur === 'FIX_PER_JAM') return Number(s.tarifLemburJam || 0);
+  if (s.modeLembur === 'PRORATA_HARIAN') {
+    const jk = Number(s.jamKerjaSehari || 7) || 7;
+    const pengali = libur ? Number(s.pengaliLibur || 1) : Number(s.pengaliKerja || 1);
+    return (Number(harian || 0) / jk) * pengali;
+  }
+  return upahSejam(harian);
+}
 function nilaiLembur(jam, harian, iso) {
   const s = DB.pengaturan;
   if (s.modeLembur === 'TIDAK_ADA') return 0;
-  if (s.modeLembur === 'FIX_PER_JAM') return Number(jam || 0) * Number(s.tarifLemburJam || 0);
-  return faktorPP35(jam, isLibur(iso || todayISO())) * upahSejam(harian);
+  const libur = isLibur(iso || todayISO());
+  if (s.modeLembur === 'PP35_2021') return faktorPP35(jam, libur) * upahSejam(harian);
+  return Number(jam || 0) * tarifLemburOrang(harian, libur);
 }
-const LABEL_LEMBUR = { FIX_PER_JAM: 'Fix per jam', PP35_2021: 'PP 35/2021', TIDAK_ADA: 'Tidak ada lembur' };
+const LABEL_LEMBUR = {
+  PRORATA_HARIAN: 'Prorata upah harian (per jabatan)',
+  PP35_2021: 'PP 35/2021 (per jabatan)',
+  FIX_PER_JAM: 'Fix per jam (sama untuk semua)',
+  TIDAK_ADA: 'Tidak ada lembur'
+};
 
 /* ---------- Peran & kewenangan (dua wajah) ---------- */
 const PERAN_LABEL = { PROJECT_CONTROL: 'Project Control', DIREKTUR: 'Direktur', SITE_MANAGER: 'Site Manager', ADMIN_PROJECT: 'Admin Project' };
@@ -3302,10 +3321,16 @@ Views.pengaturan = function (tab) {
 
       '<div class="card" style="margin-top:14px"><div class="ch"><h3>Perhitungan lembur</h3></div><div class="cb">' +
       '<div class="fld"><label>Metode</label><select id="stMode" onchange="Views.gantiMode()">' +
-      ['FIX_PER_JAM', 'PP35_2021', 'TIDAK_ADA'].map(m => '<option value="' + m + '"' + (s.modeLembur === m ? ' selected' : '') + '>' + LABEL_LEMBUR[m] + '</option>').join('') +
+      ['PRORATA_HARIAN', 'PP35_2021', 'FIX_PER_JAM', 'TIDAK_ADA'].map(m => '<option value="' + m + '"' + (s.modeLembur === m ? ' selected' : '') + '>' + LABEL_LEMBUR[m] + '</option>').join('') +
       '</select><div class="hint">Rumus mengikuti pilihan ini secara otomatis. Bisa diganti kapan saja tanpa kehilangan data scan lembur.</div></div>' +
+      '<div id="boxPro" class="' + (s.modeLembur === 'PRORATA_HARIAN' ? '' : 'hide') + '"><div class="f3">' +
+      '<div class="fld"><label>Jam kerja normal per hari</label><input type="number" id="stJKH" min="1" max="12" step="0.5" value="' + (s.jamKerjaSehari || 7) + '"></div>' +
+      '<div class="fld"><label>Pengali hari kerja</label><input type="number" id="stPK" min="0" step="0.25" value="' + (s.pengaliKerja === undefined ? 1 : s.pengaliKerja) + '"></div>' +
+      '<div class="fld"><label>Pengali hari libur</label><input type="number" id="stPL" min="0" step="0.25" value="' + (s.pengaliLibur === undefined ? 2 : s.pengaliLibur) + '"></div></div>' +
+      '<div class="notice info"><div>Tarif lembur dihitung <b>per orang</b>: upah harian jabatannya &divide; jam kerja normal &times; pengali. Jadi Carpenter dan Helper otomatis berbeda tanpa perlu diisi satu per satu. Pengali 1 berarti satu jam lembur dibayar sama dengan satu jam kerja biasa.</div></div></div>' +
       '<div id="boxFix" class="' + (s.modeLembur === 'FIX_PER_JAM' ? '' : 'hide') + '">' +
-      '<div class="fld"><label>Tarif lembur per jam (Rp)</label><input type="number" id="stTarifOT" min="0" step="1000" value="' + (s.tarifLemburJam || 0) + '"></div></div>' +
+      '<div class="fld"><label>Tarif lembur per jam (Rp)</label><input type="number" id="stTarifOT" min="0" step="1000" value="' + (s.tarifLemburJam || 0) + '"></div>' +
+      '<div class="notice warn"><div><b>Perhatian:</b> metode ini memberi tarif yang <b>sama untuk semua jabatan</b>, tanpa melihat upah harian masing-masing. Pakai ini hanya kalau perusahaan memang menetapkan satu angka tunggal. Kalau ingin menyesuaikan jabatan, pilih Prorata upah harian atau PP 35/2021.</div></div></div>' +
       '<div id="boxPP" class="' + (s.modeLembur === 'PP35_2021' ? '' : 'hide') + '"><div class="f3">' +
       '<div class="fld"><label>Hari kerja sebulan</label><input type="number" id="stHKB" min="1" max="31" value="' + (s.hariKerjaSebulan || 25) + '"></div>' +
       '<div class="fld"><label>Pembagi jam sebulan</label><input type="number" id="stPembagi" min="1" value="' + (s.pembagiJam || 173) + '"></div>' +
@@ -3318,7 +3343,8 @@ Views.pengaturan = function (tab) {
       '<div class="f3"><div class="fld"><label>Upah harian (Rp)</label><input type="number" id="simUpah" value="200000" oninput="Views.simulasi()"></div>' +
       '<div class="fld"><label>Jam lembur</label><input type="number" id="simJam" value="3" step="0.5" oninput="Views.simulasi()"></div>' +
       '<div class="fld"><label>Jenis hari</label><select id="simHari" onchange="Views.simulasi()"><option value="kerja">Hari kerja</option><option value="libur">Hari libur</option></select></div></div>' +
-      '<div id="simHasil" style="font-size:14px;font-weight:700"></div></div></div>' +
+      '<div id="simHasil" style="font-size:14px;font-weight:700"></div>' +
+      '<div id="simTabel" style="margin-top:12px"></div></div></div>' +
       '<button class="btn" onclick="Views.simpanLemburSet()">Simpan perhitungan lembur</button></div></div>';
   }
 
@@ -3383,32 +3409,86 @@ Views.pengaturan = function (tab) {
 };
 function fld(lb, id, tipe, val) { return '<div class="fld"><label>' + lb + '</label><input type="' + tipe + '" id="' + id + '" value="' + esc(val || '') + '"></div>'; }
 function kunciTarif(j) { return 'tj_' + btoa(unescape(encodeURIComponent(j))).replace(/=/g, ''); }
+Views.setelanSimulasi = function () {
+  const m = $('stMode').value;
+  return Object.assign({}, DB.pengaturan, {
+    modeLembur: m,
+    tarifLemburJam: Number(($('stTarifOT') || {}).value || 0),
+    jamKerjaSehari: Number(($('stJKH') || {}).value || DB.pengaturan.jamKerjaSehari || 7),
+    pengaliKerja: Number(($('stPK') || {}).value || 0),
+    pengaliLibur: Number(($('stPL') || {}).value || 0),
+    hariKerjaSebulan: Number(($('stHKB') || {}).value || DB.pengaturan.hariKerjaSebulan || 25),
+    pembagiJam: Number(($('stPembagi') || {}).value || DB.pengaturan.pembagiJam || 173),
+    sistemKerja: ($('stSistem') || {}).value || DB.pengaturan.sistemKerja || '6HARI'
+  });
+};
+function dgnSetelan(sim, fn) {
+  const asli = DB.pengaturan; DB.pengaturan = sim;
+  try { return fn(); } finally { DB.pengaturan = asli; }
+}
 Views.gantiMode = function () {
   const m = $('stMode').value;
+  $('boxPro').classList.toggle('hide', m !== 'PRORATA_HARIAN');
   $('boxFix').classList.toggle('hide', m !== 'FIX_PER_JAM');
   $('boxPP').classList.toggle('hide', m !== 'PP35_2021');
   Views.simulasi();
 };
 Views.simulasi = function () {
   if (!$('simHasil')) return;
-  const upah = Number($('simUpah').value || 0), jam = Number($('simJam').value || 0), libur = $('simHari').value === 'libur';
-  const m = $('stMode').value;
+  const upah = Number($('simUpah').value || 0), jam = Number($('simJam').value || 0);
+  const libur = $('simHari').value === 'libur';
+  const sim = Views.setelanSimulasi(), m = sim.modeLembur;
   let hasil = 0, ket = '';
-  if (m === 'TIDAK_ADA') { hasil = 0; ket = 'Lembur tidak dibayar.'; }
+
+  if (m === 'TIDAK_ADA') { ket = 'Lembur tidak dibayar pada mode ini.'; }
   else if (m === 'FIX_PER_JAM') {
-    const tarif = Number(($('stTarifOT') || {}).value || 0);
-    hasil = jam * tarif; ket = jam + ' jam × ' + rupiah(tarif) + ' per jam.';
+    hasil = jam * Number(sim.tarifLemburJam || 0);
+    ket = jam + ' jam × ' + rupiah(sim.tarifLemburJam) + ' per jam — sama untuk semua jabatan.';
+  } else if (m === 'PRORATA_HARIAN') {
+    const sejam = dgnSetelan(sim, () => tarifLemburOrang(upah, libur));
+    hasil = jam * sejam;
+    ket = rupiah(upah) + ' ÷ ' + sim.jamKerjaSehari + ' jam × pengali ' +
+      (libur ? sim.pengaliLibur : sim.pengaliKerja) + ' = ' + rupiah(sejam) + ' per jam, dikali ' + jam + ' jam.';
   } else {
-    const hkb = Number(($('stHKB') || {}).value || 25), pemb = Number(($('stPembagi') || {}).value || 173);
-    const sim = Object.assign({}, DB.pengaturan, { hariKerjaSebulan: hkb, pembagiJam: pemb, sistemKerja: ($('stSistem') || {}).value || '6HARI' });
-    const asli = DB.pengaturan; DB.pengaturan = sim;
-    const f = faktorPP35(jam, libur), sejam = upahSejam(upah);
-    DB.pengaturan = asli;
+    const f = dgnSetelan(sim, () => faktorPP35(jam, libur));
+    const sejam = dgnSetelan(sim, () => upahSejam(upah));
     hasil = f * sejam;
     ket = 'Upah sejam ' + rupiah(sejam) + ' × faktor ' + f.toFixed(2) + ' (' + (libur ? 'hari libur' : 'hari kerja') + ').';
   }
   $('simHasil').innerHTML = 'Upah lembur: <span style="color:var(--crimson)">' + rupiah(hasil) + '</span>' +
     '<div style="font-size:11.5px;font-weight:500;color:var(--muted);margin-top:3px">' + ket + '</div>';
+  Views.tabelSimulasi(sim, jam, libur);
+};
+Views.tabelSimulasi = function (sim, jam, libur) {
+  if (!$('simTabel')) return;
+  const tarif = sim.tarifJabatan || {};
+  const jab = Object.keys(tarif).filter(j => Number(tarif[j] || 0) > 0).sort();
+  const jml = {};
+  DB.pegawai.forEach(p => { if (p.status === 'Aktif') jml[p.jabatan] = (jml[p.jabatan] || 0) + 1; });
+  if (!jab.length) {
+    $('simTabel').innerHTML = '<div class="notice warn"><div>Belum ada jabatan yang bertarif. Isi upah harian di tabel atas dulu supaya perbandingan per jabatan bisa ditampilkan.</div></div>';
+    return;
+  }
+  const sama = sim.modeLembur === 'FIX_PER_JAM' || sim.modeLembur === 'TIDAK_ADA';
+  $('simTabel').innerHTML =
+    '<div style="font-size:12px;font-weight:650;margin-bottom:7px">Perbandingan per jabatan — ' + jam + ' jam lembur, ' + (libur ? 'hari libur' : 'hari kerja') + '</div>' +
+    '<div class="tblwrap" style="border:1px solid var(--line);border-radius:10px"><table><thead><tr>' +
+    '<th>Jabatan</th><th class="r">Personel aktif</th><th class="r">Upah harian</th><th class="r">Tarif lembur / jam</th><th class="r">Upah lembur ' + jam + ' jam</th>' +
+    '</tr></thead><tbody>' +
+    jab.map(j => {
+      const h = Number(tarif[j] || 0);
+      const sejam = dgnSetelan(sim, () => sim.modeLembur === 'PP35_2021'
+        ? (jam ? faktorPP35(jam, libur) * upahSejam(h) / jam : upahSejam(h) * (libur ? 2 : 1.5))
+        : tarifLemburOrang(h, libur));
+      const total = dgnSetelan(sim, () => nilaiLembur(jam, h, libur ? '2026-09-06' : '2026-09-02'));
+      return '<tr><td><b>' + esc(j) + '</b></td><td class="r num" style="color:var(--muted)">' + (jml[j] || 0) + '</td>' +
+        '<td class="r num">' + rupiah(h) + '</td>' +
+        '<td class="r num">' + rupiah(sejam) + '</td>' +
+        '<td class="r num"><b>' + rupiah(total) + '</b></td></tr>';
+    }).join('') + '</tbody></table></div>' +
+    '<div style="font-size:11.5px;color:' + (sama ? 'var(--amber)' : 'var(--muted)') + ';margin-top:8px">' +
+    (sama ? 'Perhatikan: pada metode ini seluruh jabatan mendapat tarif lembur yang sama walaupun upah hariannya berbeda.'
+      : 'Tarif lembur mengikuti upah harian tiap jabatan secara otomatis — tidak perlu diisi satu per satu.') + '</div>';
 };
 Views.simpanTarif = function () {
   const t = Object.assign({}, TARIF_AWAL, DB.pengaturan.tarifJabatan || {});
@@ -3428,6 +3508,9 @@ Views.simpanLemburSet = function () {
   const m = $('stMode').value;
   Object.assign(DB.pengaturan, {
     modeLembur: m,
+    jamKerjaSehari: Number(($('stJKH') || {}).value || DB.pengaturan.jamKerjaSehari || 7),
+    pengaliKerja: Number(($('stPK') || {}).value || 0),
+    pengaliLibur: Number(($('stPL') || {}).value || 0),
     tarifLemburJam: Number(($('stTarifOT') || {}).value || DB.pengaturan.tarifLemburJam || 0),
     hariKerjaSebulan: Number(($('stHKB') || {}).value || DB.pengaturan.hariKerjaSebulan || 25),
     pembagiJam: Number(($('stPembagi') || {}).value || DB.pengaturan.pembagiJam || 173),
@@ -3585,6 +3668,9 @@ function migrasi() {
   if (['LEMBUR_PP35', 'PP35'].indexOf(DB.pengaturan.modeLembur) >= 0) DB.pengaturan.modeLembur = 'PP35_2021';
   if (['LEMBUR_KESEPAKATAN_AEN', 'FIX'].indexOf(DB.pengaturan.modeLembur) >= 0) DB.pengaturan.modeLembur = 'FIX_PER_JAM';
   if (DB.pengaturan.modeLembur === 'TIDAK_ADA_LEMBUR') DB.pengaturan.modeLembur = 'TIDAK_ADA';
+  if (DB.pengaturan.jamKerjaSehari === undefined) DB.pengaturan.jamKerjaSehari = 7;
+  if (DB.pengaturan.pengaliKerja === undefined) DB.pengaturan.pengaliKerja = 1;
+  if (DB.pengaturan.pengaliLibur === undefined) DB.pengaturan.pengaliLibur = 2;
   // perbarui nama & jabatan personel dari master resmi bila masih placeholder lama
   if (String(DB.versi || '') < '4.1') {
     PEGAWAI_AWAL.forEach(m => {
