@@ -1769,8 +1769,35 @@ function progresVolume(sampai) {
   }));
   return { rencana: R, terpasang: T, pct: R ? (T / R * 100) : 0 };
 }
+/* Nama kegiatan yang berlaku untuk satu tipe — diambil dari Action Plan,
+   dan kalau tipe itu belum ada di Action Plan, dari kegiatan berbobot. */
+function namaKegTipe(tipe) {
+  const nama = [];
+  (DB.actionPlan || []).filter(r => r.tipe === tipe).forEach(r => { if (nama.indexOf(r.kegiatan) < 0) nama.push(r.kegiatan); });
+  if (nama.length) return nama;
+  const p = petaBobotKeg();
+  const berbobot = Object.keys(p).filter(k => Number(p[k] || 0) > 0);
+  return berbobot.length ? berbobot : kegOpname().map(k => k.nama);
+}
+/* Progress satu titik menurut bobot kontrak — dipakai bila Master volume
+   belum diisi. Rebar 15% pada titik dengan bobot 25% berarti titik itu
+   sudah 3,75%. */
+function persenTitikKontrak(lubang, sampai) {
+  const nama = namaKegTipe(lubang.tipe);
+  const w = bobotKegPadaTipe(nama);
+  let pct = 0;
+  nama.forEach(n => { pct += (w[n] || 0) * persenKeg(lubang.id, kegIdDariNama(n), sampai) / 100; });
+  return Math.max(0, Math.min(100, pct));
+}
 /* Bobot satu titik terhadap seluruh proyek, dan progress titik itu */
 function bobotTitik(lubang, sampai) {
+  /* Master volume belum diisi: jangan tampilkan 0,00% seolah titik ini
+     tidak berarti apa-apa. Bobot dibagi rata antar titik, dan progressnya
+     dihitung dari bobot kegiatan kontrak. */
+  if (!volumeSudahDiisi()) {
+    const n = DB.lubang.length || 1;
+    return { volume: 0, terpasang: 0, bobot: 100 / n, pct: persenTitikKontrak(lubang, sampai), kontrak: true };
+  }
   const tot = progresVolume(sampai).rencana || 1;
   let r = 0, t = 0;
   kegOpname().forEach(k => { const v = volRencanaTitik(lubang, k.id); if (!v) return; r += v; t += volTerpasangTitik(lubang, k.id, sampai); });
@@ -1839,8 +1866,9 @@ function monitorMPJ(bulan, opsi) {
     if (opsi.sembunyikanSelesai) {
       baris = baris.filter(r => persenTipeSd(tipe, kegIdDariNama(r.kegiatan), tglBulan(bulan, nHari)) < 100);
     }
-    const nKeg = baris.length || 1;
-    const bobot = 100 / nKeg;
+    /* bobot mengikuti kontrak (mis. 4 kegiatan x 25%), bukan sekadar
+       100% dibagi jumlah baris yang muncul di Action Plan */
+    const wTipe = bobotKegPadaTipe(baris.map(r => r.kegiatan));
     const jmlTitik = DB.lubang.filter(l => l.tipe === tipe).length;
 
     const keg = baris.map(r => {
@@ -1858,7 +1886,7 @@ function monitorMPJ(bulan, opsi) {
         ? Number(((DB.pengaturan.volumeTipe || {})[tipe] || {})[kid] || 0) : 0;
       return {
         nama: r.kegiatan, kegId: kid, titik: jmlTitik || Number(r.volume || 0),
-        bobot: bobot, volume: kum, harian: harian, m3: m3,
+        bobot: wTipe[r.kegiatan] || 0, volume: kum, harian: harian, m3: m3,
         warna: (DB.kegiatan.find(k => k.id === kid) || {}).warna || '#7B8794'
       };
     });
@@ -2007,17 +2035,98 @@ function jamLemburPer(pegawaiId, filterBulan) {
   return out;
 }
 
+/* ==================================================================
+   BOBOT KONTRAK PER KEGIATAN
+   Satu titik foundation dinilai dari kegiatan kontraknya, bukan dari
+   jumlah baris yang kebetulan ada di Action Plan. Contoh yang dipakai
+   di Pondasi Mucoindo: Rebar, Bekisting, Pengecoran Footplat, dan
+   Pengecoran Pedestal, masing-masing 25% — empat-empatnya genap 100%.
+   Kegiatan penunjang seperti Galian atau Lean Concrete tetap dicatat
+   di Progress Harian, tetapi tidak menambah persentase kontrak.
+   ================================================================== */
+const BOBOT_KONTRAK_AWAL = {
+  'Rebar / Pembesian': 25, 'Bekisting': 25,
+  'Pengecoran Footplat': 25, 'Pengecoran Pedestal': 25
+};
+function petaBobotKeg() {
+  const p = DB.pengaturan.bobotKeg;
+  return (p && typeof p === 'object') ? p : {};
+}
+function adaBobotKontrak() {
+  const p = petaBobotKeg();
+  return Object.keys(p).some(k => Number(p[k] || 0) > 0);
+}
+/* Bobot tiap kegiatan pada satu tipe pondasi.
+   - Kalau bobot kontrak belum diatur sama sekali, kembali ke cara lama:
+     100% dibagi rata ke seluruh kegiatan tipe tersebut.
+   - Kalau tipe itu ternyata tidak memuat satu pun kegiatan berbobot
+     (mis. tipe khusus galian), juga dibagi rata supaya tidak nol. */
+function bobotKegPadaTipe(daftarNama) {
+  const p = petaBobotKeg(), out = {};
+  const rata = () => { daftarNama.forEach(n => { out[n] = 100 / (daftarNama.length || 1); }); return out; };
+  if (!adaBobotKontrak()) return rata();
+  let tot = 0;
+  daftarNama.forEach(n => { out[n] = Number(p[n] || 0); tot += out[n]; });
+  if (!tot) return rata();
+  /* Penyesuaian: kalau kegiatan kontrak pada tipe ini tidak lengkap
+     (misalnya Rebar belum dimasukkan ke Action Plan), angkanya
+     diskalakan supaya tipe itu tetap genap 100%. Bisa dimatikan. */
+  if (DB.pengaturan.bobotRata !== false && Math.abs(tot - 100) > 0.01) {
+    daftarNama.forEach(n => { out[n] = out[n] / tot * 100; });
+  }
+  return out;
+}
+/* Action Plan digabung per tipe + kegiatan, lengkap dengan bobotnya.
+   Satu tipe bisa punya beberapa baris untuk kegiatan yang sama, jadi
+   volumenya dijumlahkan dulu supaya bobotnya tidak terhitung ganda. */
+function apBerbobot() {
+  const ap = DB.actionPlan || [];
+  const perTipe = {};
+  ap.forEach(r => { (perTipe[r.tipe] = perTipe[r.tipe] || []).push(r); });
+  const out = [];
+  Object.keys(perTipe).forEach(tipe => {
+    const nama = [];
+    perTipe[tipe].forEach(r => { if (nama.indexOf(r.kegiatan) < 0) nama.push(r.kegiatan); });
+    const w = bobotKegPadaTipe(nama);
+    nama.forEach(n => {
+      const baris = perTipe[tipe].filter(r => r.kegiatan === n);
+      const plan = {};
+      baris.forEach(r => Object.keys(r.plan || {}).forEach(pid => { plan[pid] = Number(plan[pid] || 0) + Number(r.plan[pid] || 0); }));
+      out.push({
+        tipe: tipe, kegiatan: n, kegId: kegIdDariNama(n),
+        volume: baris.reduce((a, r) => a + Number(r.volume || 0), 0),
+        close: baris.reduce((a, r) => a + Number(r.close || 0), 0),
+        plan: plan, bobot: w[n] || 0
+      });
+    });
+  });
+  return out;
+}
+/* Realisasi satu baris Action Plan pada posisi tanggal tertentu, dengan
+   nilai sebagian. Rebar satu titik yang baru 15% dihitung 0,15 titik —
+   bukan 0 seperti sebelumnya, dan bukan 1 sebelum benar-benar selesai. */
+function aktualBaris(b, sd) {
+  const lub = DB.lubang.filter(l => l.tipe === b.tipe);
+  if (!lub.length) return 0;
+  const jml = lub.reduce((a, l) => a + persenKeg(l.id, b.kegId, sd) / 100, 0);
+  return b.volume ? Math.min(jml, b.volume) : jml;
+}
+
 /* ---------- Kurva S ---------- */
 function dataKurvaS() {
-  const ap = DB.actionPlan || [], per = DB.periode || [];
-  const totalVol = ap.reduce((s, r) => s + Number(r.volume || 0), 0) || 1;
-  const closeVol = ap.reduce((s, r) => s + Number(r.close || 0), 0);
+  const per = DB.periode || [];
+  const baris = apBerbobot();
+  /* Semua angka di bawah ini memakai satuan "titik setara": satu titik
+     yang seluruh kegiatan kontraknya tuntas bernilai 1. */
+  const unit = b => Number(b.volume || 0) * b.bobot / 100;
+  const totalVol = baris.reduce((s, b) => s + unit(b), 0) || 1;
+  const closeVol = baris.reduce((s, b) => s + Number(b.close || 0) * b.bobot / 100, 0);
   const titik = [{ label: 'Baseline', plan: closeVol, aktual: closeVol, akhir: per.length ? per[0].mulai : todayISO() }];
   let kum = closeVol;
   per.forEach(p => {
-    kum += ap.reduce((s, r) => s + Number((r.plan || {})[p.id] || 0), 0);
-    const aktual = closeVol + DB.progress.filter(x => x.tanggal <= p.akhir).reduce((s, x) => s + Number(x.aktual || 0), 0);
-    titik.push({ label: p.label, plan: kum, aktual: Math.min(aktual, totalVol), akhir: p.akhir });
+    kum += baris.reduce((s, b) => s + Number((b.plan || {})[p.id] || 0) * b.bobot / 100, 0);
+    const aktual = baris.reduce((s, b) => s + aktualBaris(b, p.akhir) * b.bobot / 100, 0);
+    titik.push({ label: p.label, plan: Math.min(kum, totalVol), aktual: Math.min(Math.max(aktual, closeVol), totalVol), akhir: p.akhir });
   });
   const hariIni = todayISO();
   titik.forEach(t => { t.planPct = t.plan / totalVol * 100; t.aktualPct = t.aktual / totalVol * 100; t.lewat = t.akhir <= hariIni; });
@@ -3105,6 +3214,11 @@ Views.opname = function (tab) {
             '<div class="num" style="font-size:11px;color:var(--muted);margin-top:3px">' + b.pct.toFixed(0) + '%</div></div></td></tr>';
         }).join('') + '</tbody></table></div>'
         : UI.kosong('Belum ada lubang foundation', 'Tambahkan titik pekerjaan pada menu Lubang Foundation.')) + '</div></div>' +
+      (volumeSudahDiisi() ? '' :
+        '<div class="notice warn"><div><b>Master volume belum diisi, jadi bobot dibagi rata antar titik</b> (' +
+        (100 / (DB.lubang.length || 1)).toFixed(2) + '% per titik). Kolom <b>Progress</b> tetap terisi karena dihitung dari ' +
+        '<b>bobot kegiatan kontrak</b> — lihat tombol <i>Atur bobot</i> di menu Action Plan &amp; Kurva S. ' +
+        'Isi Master volume hanya bila Anda ingin bobot titik mengikuti besar volumenya (F1 lebih berat daripada TB1).</div></div>') +
       '<div class="notice info"><div><b>Bobot</b> tiap titik = volume titik itu &divide; total volume proyek. Titik F1 otomatis berbobot lebih besar daripada TB1 karena volumenya lebih besar — tidak dibagi rata. ' +
       'Kolom <b>Faktor</b> dipakai bila ada titik yang dimensinya berbeda dari tipenya (diatur di form Lubang).</div></div>';
   }
@@ -4150,6 +4264,13 @@ function seragamkanPin610() {
   DB.pengaturan.pinVersi = '6.10';
   if (n) { try { jejak('UBAH', 'USERS', n + ' PIN diseragamkan pada pemasangan V6.10'); } catch (e) { } }
 }
+/* Bobot kontrak diisi sekali dengan susunan yang dipakai di proyek
+   Pondasi Mucoindo. Setelah itu bebas diubah lewat tombol Atur bobot. */
+function pastikanBobotKontrak() {
+  if (DB.pengaturan.bobotKeg && typeof DB.pengaturan.bobotKeg === 'object') return;
+  DB.pengaturan.bobotKeg = Object.assign({}, BOBOT_KONTRAK_AWAL);
+  if (DB.pengaturan.bobotRata === undefined) DB.pengaturan.bobotRata = true;
+}
 function migrasiKeuangan() {
   let n = 0;
   (DB.pettyCash || []).forEach(r => {
@@ -4856,12 +4977,18 @@ Views.actionplan = function () {
   UI.render(
     UI.head('Action Plan &amp; Kurva S', 'Rencana percepatan ' + (per[0] ? tglPendek(per[0].mulai) : '') + ' s/d ' + (per.length ? tglPendek(per[per.length - 1].akhir) : '') + ' · ' + esc(DB.pengaturan.proyek),
       (can('master') ? '<button class="btn ghost" onclick="Views.susunLingkup()"><svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h12"/></svg>Susun ulang lingkup</button>' +
+        '<button class="btn ghost" onclick="Views.aturBobot()">Atur bobot</button>' +
         '<button class="btn ghost" onclick="Views.kelolaPeriode()">Atur periode</button><button class="btn" onclick="Views.formAP()">Tambah item</button>' : '') +
       '<button class="btn ghost" onclick="Views.exportAP()">Unduh CSV</button>') +
 
+    (per.length && per[per.length - 1].akhir < per[0].mulai
+      ? '<div class="notice warn"><div><b>Periode rencana terbalik.</b> Tanggal akhir (' + tglPendek(per[per.length - 1].akhir) +
+      ') lebih awal daripada tanggal mulai (' + tglPendek(per[0].mulai) + '), sehingga kurva tidak bisa dibaca. ' +
+      'Perbaiki lewat tombol <b>Atur periode</b> — untuk target 20 September, periode terakhir berakhir di 20/09/2026.</div></div>'
+      : '') +
     '<div class="kpis">' +
-    kpi('Volume total', d.totalVol, 'titik-kegiatan dalam action plan', 'b') +
-    kpi('Close (baseline)', d.closeVol, 'sudah selesai saat rencana disusun', 'g') +
+    kpi('Volume total', angka(d.totalVol, 1), 'titik setara (sudah berbobot)', 'b') +
+    kpi('Close (baseline)', angka(d.closeVol, 1), 'sudah selesai saat rencana disusun', 'g') +
     kpi('Rencana s/d kini', d.planKini.toFixed(1) + '%', 'kumulatif menurut action plan', 'n') +
     kpi('Realisasi s/d kini', d.aktualKini.toFixed(1) + '%',
       (d.deviasi >= 0 ? 'lebih cepat ' : 'tertinggal ') + Math.abs(d.deviasi).toFixed(1) + '% dari rencana', d.deviasi >= 0 ? 'g' : 'a') +
@@ -4934,6 +5061,53 @@ Views.hapusAP = function (id) {
   UI.konfirmasi('Hapus item action plan?', esc(r.tipe) + ' — ' + esc(r.kegiatan) + '. Bobot kurva S akan dihitung ulang.', () => {
     DB.actionPlan = DB.actionPlan.filter(x => x.id !== id); catatHapus('actionPlan', id); jejak('HAPUS', 'ACTION_PLAN', r.tipe + ' ' + r.kegiatan); simpan(); Views.actionplan();
   }, 'Hapus');
+};
+Views.aturBobot = function () {
+  const p = petaBobotKeg();
+  const keg = (DB.kegiatan || []).slice().sort((a, b) => (a.urutan || 99) - (b.urutan || 99));
+  const tot = keg.reduce((a, k) => a + Number(p[k.nama] || 0), 0);
+  UI.buka(UI.sheetHead('Bobot kontrak per kegiatan',
+    'Berapa persen satu titik dianggap selesai untuk tiap kegiatan') +
+    '<div class="sb">' +
+    '<div class="notice info"><div>Isi hanya kegiatan yang dinilai dalam kontrak. Contoh Pondasi Mucoindo: ' +
+    'Rebar, Bekisting, Pengecoran Footplat, dan Pengecoran Pedestal, masing-masing <b>25</b> — genap 100. ' +
+    'Kegiatan penunjang seperti Galian atau Lean Concrete diisi <b>0</b>: tetap dicatat di Progress Harian, ' +
+    'tetapi tidak menambah persentase kontrak.</div></div>' +
+    '<div class="tblwrap" style="margin-top:12px"><table><thead><tr><th>Kegiatan</th><th class="r" style="width:130px">Bobot (%)</th></tr></thead><tbody>' +
+    keg.map(k => '<tr><td><span class="dot" style="background:' + esc(k.warna || '#7B8794') + '"></span> ' + esc(k.nama) + '</td>' +
+      '<td class="r"><input type="number" min="0" max="100" step="0.5" id="bw_' + esc(k.id) + '" value="' +
+      Number(p[k.nama] || 0) + '" style="width:100px;text-align:right;padding:7px 9px;border:1px solid var(--line);border-radius:8px" ' +
+      'oninput="Views.hitungBobot()"></td></tr>').join('') +
+    '</tbody><tfoot><tr><th class="r">TOTAL</th><th class="r num" id="bwTot">' + angka(tot, 1) + '%</th></tr></tfoot></table></div>' +
+    '<label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px;font-size:12.5px">' +
+    '<input type="checkbox" id="bwRata" style="margin-top:3px"' + (DB.pengaturan.bobotRata !== false ? ' checked' : '') + '>' +
+    '<span>Sesuaikan otomatis agar tiap tipe pondasi genap 100%. Berguna bila ada tipe yang belum memuat seluruh kegiatan kontrak di Action Plan ' +
+    '(misalnya Rebar belum dimasukkan) — tanpa ini, tipe tersebut tidak akan pernah mencapai 100%.</span></label>' +
+    '</div><div class="sf"><button class="btn ghost" onclick="UI.tutup()">Batal</button>' +
+    '<button class="btn ghost" onclick="Views.bobotBawaan()">Isi contoh 4 x 25</button>' +
+    '<button class="btn" onclick="Views.simpanBobot()">Simpan bobot</button></div>', 'narrow');
+};
+Views.hitungBobot = function () {
+  let t = 0;
+  (DB.kegiatan || []).forEach(k => { const el = $('bw_' + k.id); if (el) t += Number(el.value || 0); });
+  const el = $('bwTot');
+  if (el) { el.textContent = angka(t, 1) + '%'; el.style.color = Math.abs(t - 100) < 0.01 ? 'var(--green)' : 'var(--red)'; }
+};
+Views.bobotBawaan = function () {
+  (DB.kegiatan || []).forEach(k => { const el = $('bw_' + k.id); if (el) el.value = Number(BOBOT_KONTRAK_AWAL[k.nama] || 0); });
+  Views.hitungBobot();
+};
+Views.simpanBobot = function () {
+  const baru = {};
+  (DB.kegiatan || []).forEach(k => { const el = $('bw_' + k.id); if (el) baru[k.nama] = Number(el.value || 0); });
+  const tot = Object.keys(baru).reduce((a, n) => a + baru[n], 0);
+  if (!tot) { UI.toast('Isi minimal satu kegiatan dengan bobot lebih dari nol.', 'err'); return; }
+  DB.pengaturan.bobotKeg = baru;
+  DB.pengaturan.bobotRata = !!($('bwRata') && $('bwRata').checked);
+  jejak('UBAH', 'PENGATURAN', 'Bobot kontrak per kegiatan diperbarui (total ' + angka(tot, 1) + '%)');
+  simpan(); UI.tutup();
+  UI.toast(Math.abs(tot - 100) < 0.01 ? 'Bobot tersimpan.' : 'Bobot tersimpan — totalnya ' + angka(tot, 1) + '%, bukan 100%.', 'ok');
+  Views.actionplan();
 };
 Views.kelolaPeriode = function () {
   if (!can('master')) return;
@@ -7942,6 +8116,7 @@ function migrasi() {
   pastikanAdaPengguna();
   pastikanFinance();
   seragamkanPin610();
+  pastikanBobotKontrak();
   migrasiKeuangan();
   // perbarui nama & jabatan personel dari master resmi bila masih placeholder lama
   if (String(DB.versi || '') < '4.1') {
