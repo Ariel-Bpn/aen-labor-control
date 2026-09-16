@@ -915,20 +915,36 @@ function simpanMeta() {
     });
   });
   semua.sort((a, b) => b[1] - a[1]);
-  const u = {};
-  semua.slice(0, META_MAKS).forEach(x => { u[x[0]] = x[1].toString(36); });
 
-  const n = {};
   const np = petaNisan();
-  Object.keys(np).forEach(k => { n[k] = keMenit(np[k]); });
+  const nisanArr = Object.keys(np)
+    .map(k => [k, Date.parse(np[k]) || 0])
+    .sort((a, b) => b[1] - a[1]);
 
-  let js = '';
-  try { js = JSON.stringify({ u: u, n: n }); } catch (e) { return; }
-  if (js.length > META_BATAS_HURUF) {
-    /* terlalu panjang: sisakan yang paling baru saja */
-    const u2 = {};
-    semua.slice(0, Math.floor(META_MAKS / 3)).forEach(x => { u2[x[0]] = x[1].toString(36); });
-    try { js = JSON.stringify({ u: u2, n: n }); } catch (e) { return; }
+  function bangun(jmlU, jmlN) {
+    const u = {}; semua.slice(0, jmlU).forEach(x => { u[x[0]] = x[1].toString(36); });
+    const n = {}; nisanArr.slice(0, jmlN).forEach(x => { n[x[0]] = keMenit(np[x[0]]); });
+    let js = ''; try { js = JSON.stringify({ u: u, n: n }); } catch (e) { js = '{}'; }
+    return js;
+  }
+
+  /* PENTING: kalau gabungan terlalu panjang, KEDUA bagian (cap waktu
+     perubahan "u" MAUPUN daftar baris terhapus "n") dikecilkan
+     bergantian sampai aman — dulu cuma "u" yang dikecilkan, sehingga
+     kalau "n" sendiri sudah besar (banyak penghapusan menumpuk), sel
+     ini tetap bisa kelewat batas keras 50.000 karakter Google Sheets
+     dan SEMUA pengiriman dari SEMUA perangkat ikut gagal serentak.
+     Yang dibuang lebih dulu selalu yang paling lama, bukan yang
+     terbaru. Batas aman dipasang jauh di bawah batas keras Sheets. */
+  let jmlU = Math.min(META_MAKS, semua.length);
+  let jmlN = nisanArr.length;
+  let js = bangun(jmlU, jmlN);
+  let putaran = 0;
+  while (js.length > META_BATAS_HURUF && (jmlU > 0 || jmlN > 0) && putaran < 40) {
+    if (jmlU >= jmlN) jmlU = Math.floor(jmlU * 0.7);
+    else jmlN = Math.floor(jmlN * 0.7);
+    js = bangun(jmlU, jmlN);
+    putaran++;
   }
   DB.pengaturan.metaJSON = js;
 }
