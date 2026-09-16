@@ -1411,6 +1411,23 @@ HAK.DIREKTUR.kasPantau = 1;
 /* Titipan berlaku untuk yang tidak berwenang mengesahkan dana. */
 function bolehDana() { return can('kasDana') || can('kasTitip'); }
 function catatanTitipan() { return can('kasDana') ? false : can('kasTitip'); }
+/* Ubah/hapus transaksi kas: Finance & Project Control (kasKode) selalu
+   boleh, kapan pun. Selain itu, orang yang menginput transaksinya sendiri
+   boleh membetulkan/menghapus SELAMA belum diverifikasi Finance — begitu
+   sudah VERIFIED, dianggap sudah diaudit dan dikunci untuk Finance/PC saja.
+   Ini yang diminta admin & site manager: bisa membetulkan salah input
+   sendiri, tanpa membuka pintu mengubah punya orang lain atau data yang
+   sudah selesai diperiksa. */
+function bolehUbahKas(r) {
+  if (!r) return false;
+  if (can('kasKode')) return true;
+  if (r.verif === 'VERIFIED') return false;
+  if (String(r.oleh || '') !== (ME ? ME.nama : '')) return false;
+  if (r.jenis === 'MASUK') return bolehDana();
+  if (r.jenis === 'DIRECT') return can('kasDana');
+  return can('kasBelanja');
+}
+function bolehHapusKas(r) { return bolehUbahKas(r); }
 let ME = null;
 const can = k => !!(ME && HAK[ME.peran] && HAK[ME.peran][k]);
 const isMgmt = () => !!(ME && HAK[ME.peran].wajah === 'MANAJEMEN');
@@ -4191,6 +4208,18 @@ const JENIS_KAS = {
   KELUAR: 'Pengeluaran Petty Cash',
   DIRECT: 'Pembayaran Langsung Perusahaan'
 };
+/* Ringkasan kasar untuk Rekap biaya — 18 cost code dikelompokkan jadi 4
+   kelompok besar yang gampang dibaca sekilas (Material / Peralatan /
+   Petty cash operasional / Lain-lain). Rincian per-kode tetap tampil di
+   tabel bawahnya; ini cuma lapisan ringkasan di atasnya. Kalau nanti mau
+   diatur ulang isinya (kode mana masuk kelompok mana), cukup ubah daftar
+   di sini. */
+const KELOMPOK_BESAR = [
+  ['Material', ['MAT']],
+  ['Peralatan (tools, sewa alat, perawatan)', ['TLS', 'EQP', 'MNT']],
+  ['Petty cash / operasional harian', ['BBM', 'AKM', 'KON', 'OPS', 'ATK', 'PRZ', 'EXP', 'SFT', 'COM', 'BNK']],
+  ['Lain-lain (termasuk upah & subkon lewat kas)', ['LAB', 'SUB', 'MOB', 'OTH']]
+];
 function arahKas(r) { return r.jenis === 'MASUK' ? 1 : (r.jenis === 'DIRECT' ? 0 : -1); }
 function labelJenisKas(j) { return JENIS_KAS[j] || j || '—'; }
 function barisCost(k) { return COST_CODE.find(c => c[0] === up(k)) || null; }
@@ -4524,8 +4553,9 @@ Views.kasBuku = function () {
           (b.tf ? '<a class="chip info" href="' + b.tf + '" target="_blank" download="transfer-' + r.id + '.jpg">Transfer</a>' : '') +
           (!b.nota && !b.tf ? '<span style="color:var(--muted)">—</span>' : '') + '</td>' +
           '<td class="rowact">' +
-          (can('kasKode') ? '<button class="iconbtn" title="Ubah kode biaya" onclick="Views.formKode(\'' + r.id + '\')"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4z"/></svg></button>' : '') +
-          (can('hapus') ? '<button class="iconbtn d" onclick="Views.hapusKas(\'' + r.id + '\')"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg></button>' : '') +
+          (bolehUbahKas(r) ? '<button class="iconbtn" title="Ubah transaksi (tanggal, nominal, keterangan, dll)" onclick="Views.formKas(\'' + r.jenis + '\',\'' + r.id + '\')"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4z"/></svg></button>' :
+            (can('kasKode') ? '<button class="iconbtn" title="Ubah kode biaya" onclick="Views.formKode(\'' + r.id + '\')"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4z"/></svg></button>' : '')) +
+          (bolehHapusKas(r) ? '<button class="iconbtn d" title="Hapus transaksi" onclick="Views.hapusKas(\'' + r.id + '\')"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg></button>' : '') +
           '</td></tr>';
       }).join('') + '</tbody></table></div>'
       : UI.kosong('Belum ada transaksi', 'Catat dana masuk atau pengeluaran untuk memulai.')) + '</div></div>';
@@ -4630,7 +4660,20 @@ Views.kasRekap = function () {
     daftar.map(d => '<tr' + (d[3] ? '' : ' style="color:var(--muted)"') + '><td class="mono"><b>' + esc(d[0]) + '</b></td><td>' + esc(d[1]) + '</td>' +
       '<td style="color:var(--muted)">' + esc(d[2]) + '</td><td class="r num">' + rupiah(d[3]) + '</td>' +
       '<td class="r num">' + (d[3] ? (d[3] / total * 100).toFixed(1) + '%' : '—') + '</td></tr>').join('') +
-    '</tbody><tfoot><tr><th colspan="3" class="r">TOTAL</th><th class="r num">' + rupiah(keluar + langsung) + '</th><th></th></tr></tfoot></table></div></div></div>';
+    '</tbody><tfoot><tr><th colspan="3" class="r">TOTAL</th><th class="r num">' + rupiah(keluar + langsung) + '</th><th></th></tr></tfoot></table></div></div></div>' +
+
+    '<div class="card" style="margin-top:14px"><div class="ch"><h3>Ringkasan kelompok biaya</h3></div><div class="cb flush"><div class="tblwrap"><table>' +
+    '<thead><tr><th>Kelompok</th><th style="color:var(--muted)">Termasuk kode</th><th class="r">Total biaya</th><th class="r">%</th></tr></thead><tbody>' +
+    KELOMPOK_BESAR.map(g => {
+      const nilai = g[1].reduce((s, k) => s + (per[k] || 0), 0);
+      return '<tr><td><b>' + esc(g[0]) + '</b></td>' +
+        '<td style="color:var(--muted);font-size:12px">' + g[1].join(', ') + '</td>' +
+        '<td class="r num">' + rupiah(nilai) + '</td>' +
+        '<td class="r num">' + (nilai ? (nilai / total * 100).toFixed(1) + '%' : '—') + '</td></tr>';
+    }).join('') +
+    (per.BELUM ? '<tr><td><b>Belum dikode</b></td><td style="color:var(--muted);font-size:12px">—</td>' +
+      '<td class="r num">' + rupiah(per.BELUM) + '</td><td class="r num">' + (per.BELUM ? (per.BELUM / total * 100).toFixed(1) + '%' : '—') + '</td></tr>' : '') +
+    '</tbody><tfoot><tr><th class="r" colspan="2">TOTAL</th><th class="r num">' + rupiah(keluar + langsung) + '</th><th></th></tr></tfoot></table></div></div></div>';
 };
 /* ------------------------------------------------------------------
    BUKTI NOTA
@@ -4730,44 +4773,58 @@ Views.kasBukti = function () {
       : '<div class="card" style="margin-top:12px"><div class="cb">' +
       UI.kosong('Tidak ada bukti pada saringan ini', 'Ubah rentang tanggal atau kata pencariannya.') + '</div></div>');
 };
-Views.formKas = function (jenis) {
-  if (jenis === 'KELUAR' && !can('kasBelanja')) { UI.toast('Anda tidak berwenang mencatat pengeluaran kas.', 'err'); return; }
-  if (jenis === 'MASUK' && !bolehDana()) { UI.toast('Anda tidak berwenang mencatat dana masuk.', 'err'); return; }
-  if (jenis === 'DIRECT' && !can('kasDana')) {
-    UI.toast('Pembayaran langsung perusahaan hanya diinput Finance.', 'err'); return;
+Views.formKas = function (jenis, id) {
+  const existing = id ? DB.pettyCash.find(x => x.id === id) : null;
+  if (id && !existing) { UI.toast('Transaksi tidak ditemukan.', 'err'); return; }
+  if (existing) {
+    jenis = existing.jenis;
+    if (!bolehUbahKas(existing)) { UI.toast('Anda tidak berwenang mengubah transaksi ini.', 'err'); return; }
+  } else {
+    if (jenis === 'KELUAR' && !can('kasBelanja')) { UI.toast('Anda tidak berwenang mencatat pengeluaran kas.', 'err'); return; }
+    if (jenis === 'MASUK' && !bolehDana()) { UI.toast('Anda tidak berwenang mencatat dana masuk.', 'err'); return; }
+    if (jenis === 'DIRECT' && !can('kasDana')) {
+      UI.toast('Pembayaran langsung perusahaan hanya diinput Finance.', 'err'); return;
+    }
   }
-  Views._bukti = ''; Views._buktiTf = '';
-  const judul = jenis === 'MASUK' ? 'Catat dana masuk petty cash'
-    : jenis === 'DIRECT' ? 'Catat pembayaran langsung perusahaan' : 'Catat pengeluaran petty cash';
+  const bSaat = existing ? pisahBukti(existing) : { nota: '', tf: '' };
+  Views._bukti = bSaat.nota; Views._buktiTf = bSaat.tf;
+  const judul = (existing ? 'Ubah ' : 'Catat ') + (jenis === 'MASUK' ? 'dana masuk petty cash'
+    : jenis === 'DIRECT' ? 'pembayaran langsung perusahaan' : 'pengeluaran petty cash');
   const ket = jenis === 'MASUK' ? 'Saldo kas bertambah — ini bukan biaya proyek'
     : jenis === 'DIRECT' ? 'Saldo petty cash tidak berubah, biaya langsung masuk project cost'
       : 'Saldo kas berkurang dan biaya otomatis masuk project cost';
 
-  const titip = (jenis === 'MASUK' && catatanTitipan());
+  const titip = (!existing && jenis === 'MASUK' && catatanTitipan());
+  const pratinjau = (label, url) => url ? '<div style="font-size:12px;color:var(--muted);margin-bottom:6px">' + label + ' saat ini — pilih file baru untuk mengganti</div>' +
+    '<img src="' + url + '" style="max-width:180px;border-radius:10px;border:1px solid var(--line);margin-bottom:8px">' : '';
   UI.buka(UI.sheetHead(judul, ket) +
+    (existing ? '<div class="notice info" style="margin-bottom:10px"><div>Mengubah transaksi ' + esc(existing.noTrx || '') +
+      ' yang dicatat ' + tglPendek(existing.tanggal) + ' oleh ' + esc(existing.oleh || '—') + '.</div></div>' : '') +
     '<div class="sb">' +
     (titip ? '<div class="notice warn" style="margin-bottom:10px"><div><b>Dicatat sebagai titipan.</b> ' +
       'Isi ini kalau Finance belum sempat mencatat transfernya, supaya saldo kas di lapangan tidak tertahan. ' +
       'Transaksinya akan bertanda <b>PERLU DICEK FINANCE</b> sampai Ibu Bos memverifikasi. ' +
       'Kalau Finance sudah pernah mencatatnya, sistem akan memperingatkan sebelum disimpan.</div></div>' : '') +
     '<div class="f2">' +
-    '<div class="fld"><label>Tanggal</label><input type="date" id="fkTgl" value="' + todayISO() + '"></div>' +
-    '<div class="fld"><label>Nominal (Rp)</label><input type="number" id="fkNom" min="1" placeholder="0"></div>' +
+    '<div class="fld"><label>Tanggal</label><input type="date" id="fkTgl" value="' + esc(existing ? existing.tanggal : todayISO()) + '"></div>' +
+    '<div class="fld"><label>Nominal (Rp)</label><input type="number" id="fkNom" min="1" placeholder="0" value="' + (existing ? Number(existing.nominal || 0) : '') + '"></div>' +
     (jenis === 'MASUK' ? '' :
-      '<div class="fld full"><label>Kategori biaya (cost code)</label><select id="fkCost">' + optCost('', '— pilih kategori —') + '</select></div>') +
-    '<div class="fld full"><label>Keterangan</label><input type="text" id="fkKet" placeholder="' +
+      '<div class="fld full"><label>Kategori biaya (cost code)</label><select id="fkCost">' + optCost(existing ? existing.cost : '', '— pilih kategori —') + '</select></div>') +
+    '<div class="fld full"><label>Keterangan</label><input type="text" id="fkKet" value="' + esc(existing ? existing.ket : '') + '" placeholder="' +
     (jenis === 'MASUK' ? 'mis. top up kas site dari kantor' : 'mis. pembelian kawat bendrat') + '"></div>' +
     '<div class="fld full"><label>' + (jenis === 'MASUK' ? 'Diterima dari' : 'Toko / vendor / penerima') + '</label>' +
-    '<input type="text" id="fkPihak" placeholder="' + (jenis === 'MASUK' ? 'mis. Kantor Balikpapan' : 'mis. Toko Material ABC') + '"></div>' +
-    '<div class="fld"><label>Disetujui oleh</label><input type="text" id="fkAcc" value="' + esc(ME.nama) + '"></div>' +
+    '<input type="text" id="fkPihak" value="' + esc(existing ? existing.pihak : '') + '" placeholder="' + (jenis === 'MASUK' ? 'mis. Kantor Balikpapan' : 'mis. Toko Material ABC') + '"></div>' +
+    '<div class="fld"><label>Disetujui oleh</label><input type="text" id="fkAcc" value="' + esc(existing ? (existing.acc || '') : ME.nama) + '"></div>' +
     (jenis === 'MASUK' ? '' :
-      '<div class="fld"><label>Foto nota / invoice</label><label class="photodrop" for="fkFoto" style="padding:10px;font-size:12px">Pilih foto nota<input type="file" id="fkFoto" accept="image/*" style="display:none" onchange="Views.ambilBukti(this,\'nota\')"></label></div>') +
+      '<div class="fld"><label>Foto nota / invoice</label>' + pratinjau('Nota', bSaat.nota) +
+      '<label class="photodrop" for="fkFoto" style="padding:10px;font-size:12px">' + (bSaat.nota ? 'Ganti foto nota' : 'Pilih foto nota') + '<input type="file" id="fkFoto" accept="image/*" style="display:none" onchange="Views.ambilBukti(this,\'nota\')"></label></div>') +
     (jenis === 'KELUAR' ? '' :
-      '<div class="fld"><label>Bukti transfer</label><label class="photodrop" for="fkFotoTf" style="padding:10px;font-size:12px">Pilih bukti transfer<input type="file" id="fkFotoTf" accept="image/*" style="display:none" onchange="Views.ambilBukti(this,\'tf\')"></label></div>') +
+      '<div class="fld"><label>Bukti transfer</label>' + pratinjau('Bukti transfer', bSaat.tf) +
+      '<label class="photodrop" for="fkFotoTf" style="padding:10px;font-size:12px">' + (bSaat.tf ? 'Ganti bukti transfer' : 'Pilih bukti transfer') + '<input type="file" id="fkFotoTf" accept="image/*" style="display:none" onchange="Views.ambilBukti(this,\'tf\')"></label></div>') +
     '<div class="fld full" id="fkPrev"></div>' +
     '<div class="fld full" id="fkPrevTf"></div>' +
     '</div></div><div class="sf"><button class="btn ghost" onclick="UI.tutup()">Batal</button>' +
-    '<button class="btn" onclick="Views.simpanKas(\'' + jenis + '\')">Simpan transaksi</button></div>', 'narrow');
+    '<button class="btn" onclick="Views.simpanKas(\'' + jenis + '\'' + (existing ? ',\'' + existing.id + '\'' : '') + ')">' + (existing ? 'Simpan perubahan' : 'Simpan transaksi') + '</button></div>', 'narrow');
 };
 Views.ambilBukti = function (inp, slot) {
   const f = inp.files && inp.files[0]; if (!f) return;
@@ -4789,7 +4846,10 @@ Views.ambilBukti = function (inp, slot) {
   };
   fr.readAsDataURL(f);
 };
-Views.simpanKas = function (jenis) {
+Views.simpanKas = function (jenis, id) {
+  const existing = id ? DB.pettyCash.find(x => x.id === id) : null;
+  if (id && !existing) { UI.toast('Transaksi tidak ditemukan.', 'err'); return; }
+  if (existing && !bolehUbahKas(existing)) { UI.toast('Anda tidak berwenang mengubah transaksi ini.', 'err'); return; }
   const n = Number($('fkNom').value || 0);
   if (n <= 0) { UI.toast('Nominal harus lebih dari nol.', 'err'); return; }
   if (!$('fkKet').value.trim()) { UI.toast('Keterangan wajib diisi.', 'err'); return; }
@@ -4800,6 +4860,19 @@ Views.simpanKas = function (jenis) {
   }
   const tgl = $('fkTgl').value || todayISO();
   const bukti = (Views._bukti || '') + (Views._buktiTf ? '|' + Views._buktiTf : '');
+
+  if (existing) {
+    const sebelum = tglPendek(existing.tanggal) + ' · ' + rupiah(existing.nominal) + (existing.cost ? ' · ' + existing.cost : '') + ' · ' + (existing.ket || '');
+    existing.tanggal = tgl; existing.nominal = n; existing.cost = cost;
+    existing.ket = $('fkKet').value.trim(); existing.pihak = $('fkPihak').value.trim();
+    existing.acc = $('fkAcc').value.trim(); existing.bukti = bukti;
+    existing.diubahOleh = ME.nama; existing.diubahWaktu = new Date().toISOString();
+    existing._ubah = new Date().toISOString();
+    jejak('UBAH', 'PETTY_CASH', (existing.noTrx || id) + ' diubah oleh ' + ME.nama + ' — semula: ' + sebelum);
+    simpan(); UI.tutup(); UI.toast('Perubahan tersimpan.', 'ok'); Views.cash();
+    return;
+  }
+
   const baru = {
     id: uid('PC'), noTrx: nomorTrx(tgl), tanggal: tgl, jenis, nominal: n,
     cost: cost, ket: $('fkKet').value.trim(), pihak: $('fkPihak').value.trim(),
@@ -4854,6 +4927,9 @@ Views.bukanDobel = function (id) {
     }, 'Bukan dobel');
 };
 Views.hapusKas = function (id) {
+  const r = DB.pettyCash.find(x => x.id === id);
+  if (!r) return;
+  if (!bolehHapusKas(r)) { UI.toast('Anda tidak berwenang menghapus transaksi ini.', 'err'); return; }
   UI.konfirmasi('Hapus transaksi kas?', 'Saldo berjalan akan dihitung ulang.', () => {
     DB.pettyCash = DB.pettyCash.filter(r => r.id !== id); catatHapus('pettyCash', id); jejak('HAPUS', 'PETTY_CASH', id); simpan();
     UI.toast('Transaksi dihapus.'); Views.cash();
