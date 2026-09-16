@@ -1018,7 +1018,15 @@ function gabungMeta(jsA, jsB) {
   });
   try { return JSON.stringify(out); } catch (e) { return jsA || jsB || ''; }
 }
-/* Tempelkan cap waktu titipan ke sekumpulan baris data */
+/* Tempelkan cap waktu titipan ke sekumpulan baris data.
+   PENTING: daftar "sudah dihapus" (nisan) dari titipan server juga
+   diserap ke sini pada SETIAP sinkron, bukan cuma sewaktu aplikasi
+   pertama kali dibuka (pulihkanMeta() lama hanya jalan sekali di boot).
+   Tanpa ini, perangkat yang sudah lama terbuka tidak pernah tahu kalau
+   perangkat lain baru saja menghapus sesuatu, sehingga baris yang sama
+   terus dikirim ulang (dihidupkan lagi) tanpa sadar setiap kali
+   perangkat itu sinkron — inilah sebab baris hapus tidak pernah benar-
+   benar hilang walau sudah dikirim berkali-kali. */
 function tempelMeta(kumpulan, js) {
   const m = bacaMeta(js);
   TABEL_SINKRON.forEach(t => {
@@ -1030,6 +1038,11 @@ function tempelMeta(kumpulan, js) {
       const w = dariMenit(kode);
       if (w && (!r._ubah || w > r._ubah)) r._ubah = w;
     });
+  });
+  if (!DB._nisan || typeof DB._nisan !== 'object') DB._nisan = {};
+  Object.keys(m.n || {}).forEach(k => {
+    const w = dariMenit(m.n[k]);
+    if (w && (!DB._nisan[k] || w > DB._nisan[k])) DB._nisan[k] = w;
   });
 }
 function pulihkanMeta() {
